@@ -11,13 +11,18 @@ variable "service_project_apis" {
 }
 
 variable "dev_teams" {
-    type = set(string)
-    default = ["Team A", "Team B"]
+    type = map(object({
+        name = string,
+        group_email = string
+    }))
 }
 
 locals {
-    apis_to_enable = { 
-        for p in setproduct(var.dev_teams, var.service_project_apis): p[0] => p[1]
+    apis_to_enable = {
+        for p in setproduct(values(var.dev_teams), var.service_project_apis): "${p[0].name}/${p[1]}" => {
+            team = p[0]
+            service = p[1]
+        }
     }
 }
 
@@ -36,8 +41,27 @@ data "google_organization" "org" {
 resource "google_folder" "team" {
   for_each = var.dev_teams
 
-  display_name = each.value
+  display_name = each.value.name
   parent       = data.google_organization.org.name
+}
+
+data "google_iam_policy" "editor" {
+  for_each = var.dev_teams
+
+  binding {
+    role = "roles/editor"
+
+    members = [
+      "group:${each.value.group_email}"
+    ]
+  }
+}
+
+resource "google_folder_iam_policy" "folder_admin_policy" {
+  for_each = var.dev_teams
+
+  folder      = google_folder.team[each.value.name].name
+  policy_data = data.google_iam_policy.editor[each.key].policy_data
 }
 
 resource "google_project" "host_project" {
@@ -50,10 +74,10 @@ resource "google_project" "host_project" {
 resource "google_project" "team_project" {
   for_each = var.dev_teams
 
-  name       = "${each.value} Project"
-  project_id = "${replace(lower(each.value), " ", "-")}-project-${random_id.project_id_suffix.dec}"
+  name       = "${each.value.name} Project"
+  project_id = "${replace(lower(each.value.name), " ", "-")}-project-${random_id.project_id_suffix.dec}"
   billing_account = var.billing_account_id
-  folder_id  = google_folder.team[each.value].name
+  folder_id  = google_folder.team[each.value.name].name
   auto_create_network = false
 }
 
@@ -71,6 +95,13 @@ resource "google_compute_shared_vpc_service_project" "service_team" {
 resource "google_project_service" "service" {
   for_each = local.apis_to_enable
 
-  project = google_project.team_project[each.key].project_id
-  service = each.value
+  project = google_project.team_project[each.value.team.name].project_id
+  service = each.value.service
+}
+
+resource "google_compute_network" "shared_network" {
+  name = "shared-network"
+  project = google_project.host_project.project_id
+  auto_create_subnetworks = false
+  delete_default_routes_on_create = true
 }
